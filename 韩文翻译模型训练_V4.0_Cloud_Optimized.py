@@ -26,24 +26,23 @@ DEVICE = get_device()
 print(f"当前运行设备: {DEVICE}")
 
 def mount_google_drive():
-    """如果是 Colab 环境，尝试挂载 Google Drive"""
-    # 检查是否在 Colab 环境中运行
+    """如果是 Colab 环境，检查或提示挂载 Google Drive"""
+    if os.path.exists('/content/drive/MyDrive'):
+        print("✅ 检测到 Google Drive 已挂载。")
+        return True
+        
     try:
         import sys
-        if 'google.colab' in sys.modules or 'google.colab' in sys.builtin_module_names:
-             from google.colab import drive
-             print("检测到 Colab 环境，正在尝试挂载 Google Drive...")
-             drive.mount('/content/drive')
-             return True
-        # 另一种检测方式：检查是否存在 /content 目录（Colab 特有）
-        elif os.path.exists('/content'):
-             from google.colab import drive
-             print("检测到潜在的 Colab 环境，正在尝试挂载 Google Drive...")
-             drive.mount('/content/drive')
-             return True
+        # 判断是否在 Colab 内部（交互式环境）
+        is_colab = 'google.colab' in sys.modules or os.path.exists('/content')
+        
+        if is_colab:
+            print("提示: 在 Colab 中使用 !python 运行脚本时无法直接挂载网盘。")
+            print("请确保您已在 Colab 的代码单元格中运行了以下代码：")
+            print("    from google.colab import drive")
+            print("    drive.mount('/content/drive')")
         return False
-    except (ImportError, ModuleNotFoundError):
-        # 在本地环境中，这个报错是正常的，直接跳过
+    except Exception:
         return False
 
 def find_data_file(filename):
