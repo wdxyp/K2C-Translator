@@ -213,6 +213,15 @@ def train_on_cloud(corpus_path):
     korean_vocab = build_vocab(ko_train)
     chinese_vocab = build_vocab(zh_train)
     
+    # 打印统计信息
+    print("\n" + "="*30)
+    print(f"📊 训练统计结果:")
+    print(f"   训练集句子数: {len(ko_train)}")
+    print(f"   测试集句子数: {len(ko_test)}")
+    print(f"   韩语词汇表大小: {len(korean_vocab)}")
+    print(f"   中文词汇表大小: {len(chinese_vocab)}")
+    print("="*30 + "\n")
+    
     # 转张量
     train_data = list(zip(text_to_tensor(ko_train, korean_vocab), text_to_tensor(zh_train, chinese_vocab)))
     test_data = list(zip(text_to_tensor(ko_test, korean_vocab), text_to_tensor(zh_test, chinese_vocab)))
