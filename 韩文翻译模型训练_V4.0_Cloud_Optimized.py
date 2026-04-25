@@ -12,6 +12,7 @@ import jieba
 import openpyxl
 from konlpy.tag import Okt
 from datetime import datetime
+import hashlib
 
 # ========== 1. 环境与设备配置 ==========
 def get_device():
@@ -80,29 +81,55 @@ def clean_text(sentence):
     sentence = re.sub(r'[^\w\s]', '', str(sentence))
     return sentence.strip()
 
-def tokenize(sentences, lang):
+def tokenize(sentences, lang, cache_path=None):
+    # 1. 尝试从缓存读取
+    if cache_path and os.path.exists(cache_path):
+        print(f"📦 检测到 {lang} 分词缓存，正在加载...")
+        with open(cache_path, 'rb') as f:
+            return pickle.load(f)
+
     tokenized = []
     total = len(sentences)
-    print(f"正在对 {lang} 语料进行分词，总计 {total} 条句子...")
+    print(f"正在对 {lang} 语料进行分词，总计 {total} 条句子 (此过程仅在首次运行时较慢)...")
+    
     if lang == 'ko':
         try:
             okt = Okt()
             for i, sentence in enumerate(sentences):
                 tokens = okt.morphs(sentence)
                 tokenized.append(tokens)
-                if (i + 1) % 1000 == 0:
+                if (i + 1) % 2000 == 0:
                     print(f"  已完成 {i+1}/{total} ({(i+1)/total*100:.1f}%)", end='\r')
         except Exception as e:
             print(f"韩文分词器启动失败: {e}. 尝试空格分词...")
             for i, sentence in enumerate(sentences):
                 tokenized.append(sentence.split())
     elif lang == 'zh':
-        for i, sentence in enumerate(sentences):
-            tokens = jieba.lcut(sentence)
-            tokenized.append(tokens)
-            if (i + 1) % 1000 == 0:
-                print(f"  已完成 {i+1}/{total} ({(i+1)/total*100:.1f}%)", end='\r')
+        # jieba 开启并行分词 (仅在类 Unix 环境有效)
+        try:
+            if os.name != 'nt':
+                jieba.enable_parallel()
+            for i, sentence in enumerate(sentences):
+                tokens = jieba.lcut(sentence)
+                tokenized.append(tokens)
+                if (i + 1) % 5000 == 0:
+                    print(f"  已完成 {i+1}/{total} ({(i+1)/total*100:.1f}%)", end='\r')
+            if os.name != 'nt':
+                jieba.disable_parallel()
+        except Exception:
+            for i, sentence in enumerate(sentences):
+                tokens = jieba.lcut(sentence)
+                tokenized.append(tokens)
+                
     print(f"\n{lang} 分词完成！")
+    
+    # 2. 保存到缓存
+    if cache_path:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, 'wb') as f:
+            pickle.dump(tokenized, f)
+        print(f"💾 {lang} 分词结果已缓存至: {cache_path}")
+        
     return tokenized
 
 def build_vocab(sentences, min_freq=2, max_size=30000):
@@ -192,6 +219,12 @@ def collate_fn(batch, pad_idx):
 def train_on_cloud(corpus_path):
     print(f"开始云端训练任务，数据源: {corpus_path}")
     
+    # 建立缓存路径 (基于文件修改时间，防止文件更新后缓存失效)
+    file_mtime = os.path.getmtime(corpus_path)
+    cache_dir = "token_cache"
+    ko_cache = os.path.join(cache_dir, f"ko_{int(file_mtime)}.pkl")
+    zh_cache = os.path.join(cache_dir, f"zh_{int(file_mtime)}.pkl")
+    
     # 读取语料
     all_ko, all_zh = [], []
     wb = openpyxl.load_workbook(corpus_path, data_only=True)
@@ -205,8 +238,8 @@ def train_on_cloud(corpus_path):
             all_zh.append(clean_text(row[3]))
     
     # 分词与划分
-    ko_tokens = tokenize(all_ko, 'ko')
-    zh_tokens = tokenize(all_zh, 'zh')
+    ko_tokens = tokenize(all_ko, 'ko', cache_path=ko_cache)
+    zh_tokens = tokenize(all_zh, 'zh', cache_path=zh_cache)
     ko_train, ko_test, zh_train, zh_test = train_test_split(ko_tokens, zh_tokens, test_size=0.1, random_state=42)
 
     # 词汇表
