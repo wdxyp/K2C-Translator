@@ -4,6 +4,7 @@ from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.nn.utils.clip_grad import clip_grad_norm_
 from collections import Counter
 import os
 import pickle
@@ -23,6 +24,57 @@ def get_device():
 
 DEVICE = get_device()
 print(f"当前运行设备: {DEVICE}")
+
+def mount_google_drive():
+    """如果是 Colab 环境，尝试挂载 Google Drive"""
+    # 检查是否在 Colab 环境中运行
+    try:
+        import sys
+        if 'google.colab' in sys.modules or 'google.colab' in sys.builtin_module_names:
+             from google.colab import drive
+             print("检测到 Colab 环境，正在尝试挂载 Google Drive...")
+             drive.mount('/content/drive')
+             return True
+        # 另一种检测方式：检查是否存在 /content 目录（Colab 特有）
+        elif os.path.exists('/content'):
+             from google.colab import drive
+             print("检测到潜在的 Colab 环境，正在尝试挂载 Google Drive...")
+             drive.mount('/content/drive')
+             return True
+        return False
+    except (ImportError, ModuleNotFoundError):
+        # 在本地环境中，这个报错是正常的，直接跳过
+        return False
+
+def find_data_file(filename):
+    """在当前目录和 Google Drive 中搜索数据文件"""
+    # 预设可能的后缀名
+    extensions = ['', '.xlsx', '.xls', '.csv']
+    
+    # 1. 首先在当前目录下搜索
+    for ext in extensions:
+        path = filename + ext
+        if os.path.exists(path):
+            return path
+
+    # 2. 如果在 Colab 中，搜索 Google Drive
+    drive_base = "/content/drive/MyDrive"
+    if os.path.exists(drive_base):
+        print(f"正在 Google Drive 中搜索: {filename} ...")
+        # 优先匹配根目录下的文件
+        for ext in extensions:
+            path = os.path.join(drive_base, filename + ext)
+            if os.path.exists(path):
+                return path
+        
+        # 如果根目录没找到，进行全盘递归搜索
+        for root, dirs, files in os.walk(drive_base):
+            for f in files:
+                if f.startswith(filename):
+                    full_path = os.path.join(root, f)
+                    print(f"在网盘路径中找到文件: {full_path}")
+                    return full_path
+    return None
 
 # ========== 2. 数据预处理函数 ==========
 def clean_text(sentence):
@@ -132,8 +184,9 @@ class Seq2Seq(nn.Module):
 def collate_fn(batch, pad_idx):
     ko_batch, zh_batch = zip(*batch)
     ko_lens = [len(seq) for seq in ko_batch]
-    ko_padded = torch.nn.utils.rnn.pad_sequence(ko_batch, batch_first=False, padding_value=pad_idx)
-    zh_padded = torch.nn.utils.rnn.pad_sequence(zh_batch, batch_first=False, padding_value=pad_idx)
+    # 转换为 list 以满足类型检查
+    ko_padded = torch.nn.utils.rnn.pad_sequence(list(ko_batch), batch_first=False, padding_value=pad_idx)
+    zh_padded = torch.nn.utils.rnn.pad_sequence(list(zh_batch), batch_first=False, padding_value=pad_idx)
     return ko_padded, ko_lens, zh_padded
 
 # ========== 4. 训练核心逻辑 ==========
@@ -144,6 +197,9 @@ def train_on_cloud(corpus_path):
     all_ko, all_zh = [], []
     wb = openpyxl.load_workbook(corpus_path, data_only=True)
     ws = wb.active
+    if ws is None:
+        raise ValueError("无法读取 Excel 表格内容")
+        
     for row in ws.iter_rows(min_row=2, values_only=True):
         if len(row) >= 4 and row[1] and row[3]:
             all_ko.append(clean_text(row[1]))
@@ -193,7 +249,7 @@ def train_on_cloud(corpus_path):
             trg = trg[1:].view(-1)
             loss = criterion(output, trg)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             epoch_loss += loss.item()
         
@@ -210,9 +266,16 @@ def train_on_cloud(corpus_path):
                 pickle.dump({'ko': korean_vocab, 'zh': chinese_vocab}, f)
 
 if __name__ == "__main__":
-    # 在 Colab 中，您可以直接指定数据文件路径
-    data_file = "ko-zh.xlsx" 
-    if os.path.exists(data_file):
-        train_on_cloud(data_file)
+    # 1. 尝试挂载 Google Drive (仅在 Colab 环境生效)
+    mount_google_drive()
+    
+    # 2. 搜索数据文件
+    target_filename = "Corpus(K2C)-2"
+    data_path = find_data_file(target_filename)
+    
+    if data_path:
+        print(f"成功定位数据文件: {data_path}")
+        train_on_cloud(data_path)
     else:
-        print(f"未找到数据文件: {data_file}，请确保已关联数据。")
+        print(f"❌ 错误: 无法在当前目录或 Google Drive 中找到文件 '{target_filename}'")
+        print("提示: 请确保已将文件上传到 Google Drive 的根目录，或者上传到 Colab 的 /content/ 文件夹中。")
