@@ -3,3 +3,7 @@ pandas
 openpyxl
 python-docx
 torch
+torchtext==0.6.0
+spacy
+konlpy
+zh_core_web_sm
