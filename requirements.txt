@@ -1,0 +1,9 @@
+torch
+torchtext==0.6.0
+spacy
+konlpy
+jieba
+openpyxl
+sklearn
+numpy
+zh_core_web_sm
