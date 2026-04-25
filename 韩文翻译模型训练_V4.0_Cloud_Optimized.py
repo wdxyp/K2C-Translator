@@ -243,12 +243,17 @@ def train_on_cloud(corpus_path):
     
     train_loader = torch.utils.data.DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True, 
                                                collate_fn=lambda b: collate_fn(b, korean_vocab['<pad>']))
+    test_loader = torch.utils.data.DataLoader(test_data, batch_size=BATCH_SIZE, shuffle=False,
+                                              collate_fn=lambda b: collate_fn(b, korean_vocab['<pad>']))
     
-    best_loss = float('inf')
+    best_test_loss = float('inf')
     for epoch in range(N_EPOCHS):
+        # --- 训练阶段 ---
         model.train()
-        epoch_loss = 0
-        for src, src_lens, trg in train_loader:
+        epoch_train_loss = 0
+        total_batches = len(train_loader)
+        
+        for i, (src, src_lens, trg) in enumerate(train_loader):
             src, trg = src.to(DEVICE), trg.to(DEVICE)
             optimizer.zero_grad()
             output = model(src, src_lens, trg)
@@ -259,19 +264,42 @@ def train_on_cloud(corpus_path):
             loss.backward()
             clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            epoch_loss += loss.item()
+            
+            epoch_train_loss += loss.item()
+            
+            # 实时打印批次进度
+            if (i + 1) % 10 == 0 or (i + 1) == total_batches:
+                progress = (i + 1) / total_batches * 100
+                print(f" Epoch: {epoch+1:02d}, Batch: {i+1}/{total_batches}, Progress: {progress:6.2f}%, Train Loss: {loss.item():.3f}", end='\r')
         
-        avg_loss = epoch_loss / len(train_loader)
-        print(f"Epoch {epoch+1}/{N_EPOCHS} | Loss: {avg_loss:.4f}")
+        avg_train_loss = epoch_train_loss / total_batches
+        print(f"\n Epoch: {epoch+1:02d}, Train Loss: {avg_train_loss:.3f}")
         
-        # 自动保存
-        if avg_loss < best_loss:
-            best_loss = avg_loss
+        # --- 测试阶段 ---
+        model.eval()
+        epoch_test_loss = 0
+        with torch.no_grad():
+            for src, src_lens, trg in test_loader:
+                src, trg = src.to(DEVICE), trg.to(DEVICE)
+                output = model(src, src_lens, trg, 0) # 关闭 teacher forcing
+                output_dim = output.shape[-1]
+                output = output[1:].view(-1, output_dim)
+                trg = trg[1:].view(-1)
+                loss = criterion(output, trg)
+                epoch_test_loss += loss.item()
+        
+        avg_test_loss = epoch_test_loss / len(test_loader)
+        print(f" Epoch: {epoch+1:02d}, Test Loss: {avg_test_loss:.3f}")
+        
+        # 自动保存最优模型
+        if avg_test_loss < best_test_loss:
+            best_test_loss = avg_test_loss
             save_dir = 'Translate_Model_Cloud'
             os.makedirs(save_dir, exist_ok=True)
             torch.save(model.state_dict(), f'{save_dir}/best_model.pth')
             with open(f'{save_dir}/vocabs.pkl', 'wb') as f:
                 pickle.dump({'ko': korean_vocab, 'zh': chinese_vocab}, f)
+            print(f" ✨ 检测到更好的测试损失，模型已保存至 {save_dir}/best_model.pth")
 
 if __name__ == "__main__":
     # 1. 尝试挂载 Google Drive (仅在 Colab 环境生效)
