@@ -17,33 +17,41 @@ from datetime import datetime
 
 # ========== 1. 模型架构定义 (必须与训练代码完全一致) ==========
 class Encoder(nn.Module):
-    def __init__(self, input_dim, emb_dim, hid_dim, n_layers, dropout):
+    def __init__(self, input_dim, emb_dim, hid_dim, n_layers, dropout, batch_first=True):
         super().__init__()
+        self.batch_first = batch_first
         self.embedding = nn.Embedding(input_dim, emb_dim)
-        self.rnn = nn.LSTM(emb_dim, hid_dim, n_layers, dropout=dropout, batch_first=True)
+        self.rnn = nn.LSTM(emb_dim, hid_dim, n_layers, dropout=dropout, batch_first=batch_first)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, src, src_lens):
         embedded = self.dropout(self.embedding(src))
-        # src_lens 必须在 CPU 上用于 pack_padded_sequence
-        packed = torch.nn.utils.rnn.pack_padded_sequence(embedded, src_lens.to('cpu'), batch_first=True, enforce_sorted=False)
+        if isinstance(src_lens, torch.Tensor):
+            src_lens = src_lens.to('cpu')
+        packed = torch.nn.utils.rnn.pack_padded_sequence(
+            embedded,
+            src_lens,
+            batch_first=self.batch_first,
+            enforce_sorted=False,
+        )
         _, (hidden, cell) = self.rnn(packed)
         return hidden, cell
 
 class Decoder(nn.Module):
-    def __init__(self, output_dim, emb_dim, hid_dim, n_layers, dropout):
+    def __init__(self, output_dim, emb_dim, hid_dim, n_layers, dropout, batch_first=True):
         super().__init__()
         self.output_dim = output_dim
+        self.batch_first = batch_first
         self.embedding = nn.Embedding(output_dim, emb_dim)
-        self.rnn = nn.LSTM(emb_dim, hid_dim, n_layers, dropout=dropout, batch_first=True)
+        self.rnn = nn.LSTM(emb_dim, hid_dim, n_layers, dropout=dropout, batch_first=batch_first)
         self.fc_out = nn.Linear(hid_dim, output_dim)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, input, hidden, cell):
-        input = input.unsqueeze(1) # [batch, 1]
+        input = input.unsqueeze(1) if self.batch_first else input.unsqueeze(0)
         embedded = self.dropout(self.embedding(input))
         output, (hidden, cell) = self.rnn(embedded, (hidden, cell))
-        prediction = self.fc_out(output.squeeze(1))
+        prediction = self.fc_out(output.squeeze(1) if self.batch_first else output.squeeze(0))
         return prediction, hidden, cell
 
 class Seq2Seq(nn.Module):
@@ -79,6 +87,10 @@ class TranslatorApp:
         # 设备检测
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = None
+        self._loaded_state_dict = None
+        self._loaded_hparams = None
+        self._infer_batch_first = True
+        self._last_display_batch_first = None
         self.k_vocab = None
         self.c_vocab = None
         self.inv_c_vocab = None
@@ -91,6 +103,7 @@ class TranslatorApp:
         
         # UI 变量
         self.model_path = tk.StringVar()
+        self.is_unified_vocab = tk.BooleanVar(value=True)
         self.k_vocab_path = tk.StringVar()
         self.c_vocab_path = tk.StringVar()
         self.input_file_path = tk.StringVar()
@@ -114,19 +127,26 @@ class TranslatorApp:
         tk.Entry(f1, textvariable=self.model_path).pack(side="left", fill="x", expand=True, padx=5)
         tk.Button(f1, text="浏览", command=lambda: self.browse_file(self.model_path, [("PyTorch Model", "*.pth")])).pack(side="right")
         
-        # 韩语词汇表
-        f2 = tk.Frame(load_frame)
-        f2.pack(fill="x", pady=2)
-        tk.Label(f2, text="韩语词汇 (.pkl):", width=15, anchor="w").pack(side="left")
-        tk.Entry(f2, textvariable=self.k_vocab_path).pack(side="left", fill="x", expand=True, padx=5)
-        tk.Button(f2, text="浏览", command=lambda: self.browse_file(self.k_vocab_path, [("Pickle", "*.pkl")])).pack(side="right")
+        # 词汇表模式切换
+        tk.Checkbutton(load_frame, text="使用统合词汇表 (韩文/中文在同一个文件内)", 
+                       variable=self.is_unified_vocab, command=self.toggle_vocab_ui).pack(anchor="w", pady=2)
+
+        # 韩语词汇表 (统合模式下作为唯一入口)
+        self.vocab_frame_k = tk.Frame(load_frame)
+        self.vocab_frame_k.pack(fill="x", pady=2)
+        self.lbl_k_vocab = tk.Label(self.vocab_frame_k, text="统合词汇表 (.pkl):", width=15, anchor="w")
+        self.lbl_k_vocab.pack(side="left")
+        tk.Entry(self.vocab_frame_k, textvariable=self.k_vocab_path).pack(side="left", fill="x", expand=True, padx=5)
+        tk.Button(self.vocab_frame_k, text="浏览", command=lambda: self.browse_file(self.k_vocab_path, [("Pickle", "*.pkl")])).pack(side="right")
         
-        # 中文词汇表
-        f3 = tk.Frame(load_frame)
-        f3.pack(fill="x", pady=2)
-        tk.Label(f3, text="中文词汇 (.pkl):", width=15, anchor="w").pack(side="left")
-        tk.Entry(f3, textvariable=self.c_vocab_path).pack(side="left", fill="x", expand=True, padx=5)
-        tk.Button(f3, text="浏览", command=lambda: self.browse_file(self.c_vocab_path, [("Pickle", "*.pkl")])).pack(side="right")
+        # 中文词汇表 (仅在非统合模式下显示)
+        self.vocab_frame_c = tk.Frame(load_frame)
+        if not self.is_unified_vocab.get():
+            self.vocab_frame_c.pack(fill="x", pady=2)
+            
+        tk.Label(self.vocab_frame_c, text="中文词汇 (.pkl):", width=15, anchor="w").pack(side="left")
+        tk.Entry(self.vocab_frame_c, textvariable=self.c_vocab_path).pack(side="left", fill="x", expand=True, padx=5)
+        tk.Button(self.vocab_frame_c, text="浏览", command=lambda: self.browse_file(self.c_vocab_path, [("Pickle", "*.pkl")])).pack(side="right")
         
         tk.Button(load_frame, text="🚀 点击加载模型", command=self.load_model_and_vocab, bg="#4CAF50", fg="white", font=("Arial", 10, "bold")).pack(pady=10)
 
@@ -188,6 +208,14 @@ class TranslatorApp:
         self.status_label = tk.Label(self.root, text="状态: 等待模型加载...", bd=1, relief="sunken", anchor="w", bg="#eeeeee")
         self.status_label.pack(side="bottom", fill="x")
 
+    def toggle_vocab_ui(self):
+        if self.is_unified_vocab.get():
+            self.vocab_frame_c.pack_forget()
+            self.lbl_k_vocab.config(text="统合词汇表 (.pkl):")
+        else:
+            self.vocab_frame_c.pack(fill="x", pady=2)
+            self.lbl_k_vocab.config(text="韩语词汇 (.pkl):")
+
     def browse_file(self, var, types):
         filename = filedialog.askopenfilename(filetypes=types)
         if filename:
@@ -198,42 +226,178 @@ class TranslatorApp:
         if directory:
             self.output_folder_path.set(directory)
 
+    def _extract_state_dict(self, checkpoint):
+        if isinstance(checkpoint, dict):
+            for key in ("state_dict", "model_state_dict", "model", "net"):
+                if key in checkpoint and isinstance(checkpoint[key], dict):
+                    return checkpoint[key]
+        return checkpoint
+
+    def _infer_model_hparams(self, state_dict):
+        emb_dim = None
+        hid_dim = None
+        encoder_layers = set()
+        decoder_layers = set()
+
+        enc_emb = state_dict.get("encoder.embedding.weight")
+        if enc_emb is not None and hasattr(enc_emb, "shape") and len(enc_emb.shape) == 2:
+            emb_dim = int(enc_emb.shape[1])
+
+        enc_hh = state_dict.get("encoder.rnn.weight_hh_l0")
+        if enc_hh is not None and hasattr(enc_hh, "shape") and len(enc_hh.shape) == 2:
+            hid_dim = int(enc_hh.shape[1])
+
+        for k in state_dict.keys():
+            if k.startswith("encoder.rnn.weight_ih_l"):
+                try:
+                    encoder_layers.add(int(k.split("encoder.rnn.weight_ih_l", 1)[1].split(".", 1)[0]))
+                except Exception:
+                    pass
+            elif k.startswith("decoder.rnn.weight_ih_l"):
+                try:
+                    decoder_layers.add(int(k.split("decoder.rnn.weight_ih_l", 1)[1].split(".", 1)[0]))
+                except Exception:
+                    pass
+
+        n_layers = 2
+        if encoder_layers:
+            n_layers = max(encoder_layers) + 1
+        if decoder_layers:
+            n_layers = max(n_layers, max(decoder_layers) + 1)
+
+        if emb_dim is None or hid_dim is None:
+            raise ValueError("无法从模型权重推断 EMB_DIM/HID_DIM，请确认权重文件是否为本项目训练出的 Seq2Seq")
+
+        return emb_dim, hid_dim, n_layers
+
+    def _build_model(self, emb_dim, hid_dim, n_layers, batch_first):
+        if self.k_vocab is None or self.c_vocab is None:
+            raise ValueError("词汇表未加载")
+        enc = Encoder(len(self.k_vocab), emb_dim, hid_dim, n_layers, 0.5, batch_first=batch_first)
+        dec = Decoder(len(self.c_vocab), emb_dim, hid_dim, n_layers, 0.5, batch_first=batch_first)
+        self.model = Seq2Seq(enc, dec, self.device).to(self.device)
+        self._infer_batch_first = batch_first
+
+    def _update_mode_status(self):
+        if not self._loaded_hparams:
+            return
+        if self._last_display_batch_first == self._infer_batch_first:
+            return
+        emb_dim, hid_dim, n_layers = self._loaded_hparams
+        mode = "batch_first=True" if self._infer_batch_first else "batch_first=False"
+        self.status_label.config(text=f"✅ 模型就绪 (EMB={emb_dim}, HID={hid_dim}, LAYERS={n_layers}, {mode}, 运行设备: {self.device})")
+        self._last_display_batch_first = self._infer_batch_first
+
+    def _decode_greedy(self, sentence, max_len, batch_first):
+        if not self.model or self.k_vocab is None or self.c_vocab is None or self.inv_c_vocab is None:
+            return "", 1.0
+
+        sentence = str(sentence).strip()
+        tokens = self.okt.morphs(sentence)
+        tokens = ['<sos>'] + tokens + ['<eos>']
+
+        k_vocab = self.k_vocab
+        c_vocab = self.c_vocab
+        inv_c_vocab = self.inv_c_vocab
+
+        unk_idx = k_vocab.get('<unk>', 3)
+        src_indices = [k_vocab.get(token, unk_idx) for token in tokens]
+        seq_len = len(src_indices)
+
+        if batch_first:
+            src_tensor = torch.LongTensor(src_indices).unsqueeze(0).to(self.device)
+        else:
+            src_tensor = torch.LongTensor(src_indices).unsqueeze(1).to(self.device)
+
+        src_len = [seq_len]
+
+        with torch.no_grad():
+            hidden, cell = self.model.encoder(src_tensor, src_len)
+
+        sos_idx = c_vocab.get('<sos>', 1)
+        eos_idx = c_vocab.get('<eos>', 2)
+        trg_indices = [sos_idx]
+
+        for _ in range(max_len):
+            trg_tensor = torch.LongTensor([trg_indices[-1]]).to(self.device)
+            with torch.no_grad():
+                output, hidden, cell = self.model.decoder(trg_tensor, hidden, cell)
+            pred_token = output.argmax(1).item()
+            if pred_token == eos_idx:
+                break
+            trg_indices.append(pred_token)
+
+        translated_tokens = [inv_c_vocab.get(idx, '<unk>') for idx in trg_indices[1:]]
+        if not translated_tokens:
+            return "", 1.0
+
+        unk_count = sum(1 for t in translated_tokens if t == '<unk>')
+        unk_ratio = unk_count / max(1, len(translated_tokens))
+        return "".join(translated_tokens), unk_ratio
+
     def load_model_and_vocab(self):
         try:
             m_path = self.model_path.get()
             kv_path = self.k_vocab_path.get()
             cv_path = self.c_vocab_path.get()
             
-            if not (m_path and kv_path and cv_path):
-                messagebox.showwarning("提示", "请先选择模型和词汇表文件！")
-                return
+            # 校验输入
+            if self.is_unified_vocab.get():
+                if not (m_path and kv_path):
+                    messagebox.showwarning("提示", "请先选择模型和统合词汇表文件！")
+                    return
+            else:
+                if not (m_path and kv_path and cv_path):
+                    messagebox.showwarning("提示", "请先选择模型、韩语词汇表和中文词汇表！")
+                    return
 
             self.status_label.config(text="正在加载词汇表...")
             self.root.update()
             
-            with open(kv_path, 'rb') as f: self.k_vocab = pickle.load(f)
-            with open(cv_path, 'rb') as f: self.c_vocab = pickle.load(f)
+            if self.is_unified_vocab.get():
+                with open(kv_path, 'rb') as f:
+                    combined_vocab = pickle.load(f)
+                    # 支持列表/元组格式: [k_vocab, c_vocab]
+                    if isinstance(combined_vocab, (list, tuple)) and len(combined_vocab) >= 2:
+                        self.k_vocab = combined_vocab[0]
+                        self.c_vocab = combined_vocab[1]
+                    # 支持字典格式: {'ko': korean_vocab, 'zh': chinese_vocab}
+                    elif isinstance(combined_vocab, dict):
+                        if 'ko' in combined_vocab and 'zh' in combined_vocab:
+                            self.k_vocab = combined_vocab['ko']
+                            self.c_vocab = combined_vocab['zh']
+                        elif 'korean' in combined_vocab and 'chinese' in combined_vocab:
+                            self.k_vocab = combined_vocab['korean']
+                            self.c_vocab = combined_vocab['chinese']
+                        else:
+                            raise ValueError("统合词汇表(字典)格式错误，缺少 'ko'/'zh' 或 'korean'/'chinese' 键")
+                    else:
+                        raise ValueError("统合词汇表格式不支持，请确保是 [ko, zh] 列表或 {'ko':.., 'zh':..} 字典")
+            else:
+                with open(kv_path, 'rb') as f: self.k_vocab = pickle.load(f)
+                with open(cv_path, 'rb') as f: self.c_vocab = pickle.load(f)
+            
             self.inv_c_vocab = {v: k for k, v in self.c_vocab.items()}
             
             self.status_label.config(text="正在构建模型架构...")
             self.root.update()
             
-            # 核心参数 (必须与 V5.5 训练代码一致)
-            HID_DIM = 256
-            EMB_DIM = 256
-            
-            enc = Encoder(len(self.k_vocab), EMB_DIM, HID_DIM, 2, 0.5)
-            dec = Decoder(len(self.c_vocab), EMB_DIM, HID_DIM, 2, 0.5)
-            self.model = Seq2Seq(enc, dec, self.device).to(self.device)
-            
             self.status_label.config(text="正在加载模型权重...")
             self.root.update()
             
-            state_dict = torch.load(m_path, map_location=self.device)
+            checkpoint = torch.load(m_path, map_location=self.device)
+            state_dict = self._extract_state_dict(checkpoint)
+            emb_dim, hid_dim, n_layers = self._infer_model_hparams(state_dict)
+
+            self._loaded_state_dict = state_dict
+            self._loaded_hparams = (emb_dim, hid_dim, n_layers)
+            self._build_model(emb_dim, hid_dim, n_layers, batch_first=True)
+            if self.model is None:
+                raise ValueError("模型构建失败")
             self.model.load_state_dict(state_dict)
             self.model.eval()
             
-            self.status_label.config(text=f"✅ 模型就绪 (运行设备: {self.device})")
+            self._update_mode_status()
             messagebox.showinfo("成功", "模型及词汇表加载成功，现在可以开始翻译了！")
         except Exception as e:
             self.status_label.config(text="❌ 加载失败")
@@ -266,36 +430,28 @@ class TranslatorApp:
         if not self.model or self.k_vocab is None or self.c_vocab is None or self.inv_c_vocab is None:
             return "模型或词汇表未加载"
         if not sentence or not str(sentence).strip(): return ""
-        
+
         sentence = str(sentence).strip()
-        tokens = self.okt.morphs(sentence)
-        tokens = ['<sos>'] + tokens + ['<eos>']
-        
-        # 使用 cast 或明确检查来消除 lint 错误
-        k_vocab = self.k_vocab
-        c_vocab = self.c_vocab
-        inv_c_vocab = self.inv_c_vocab
-        
-        src_indices = [k_vocab.get(token, k_vocab.get('<unk>', 3)) for token in tokens]
-        
-        src_tensor = torch.LongTensor(src_indices).unsqueeze(0).to(self.device)
-        src_len = torch.LongTensor([len(src_indices)])
-        
-        with torch.no_grad():
-            hidden, cell = self.model.encoder(src_tensor, src_len)
-            
-        trg_indices = [c_vocab['<sos>']]
-        for _ in range(max_len):
-            trg_tensor = torch.LongTensor([trg_indices[-1]]).to(self.device)
-            with torch.no_grad():
-                output, hidden, cell = self.model.decoder(trg_tensor, hidden, cell)
-            
-            pred_token = output.argmax(1).item()
-            if pred_token == c_vocab['<eos>']: break
-            trg_indices.append(pred_token)
-        
-        translated_tokens = [inv_c_vocab.get(idx, '<unk>') for idx in trg_indices[1:]]
-        result = "".join(translated_tokens)
+        result, unk_ratio = self._decode_greedy(sentence, max_len, batch_first=self._infer_batch_first)
+        if (not result or unk_ratio > 0.6) and self._loaded_state_dict and self._loaded_hparams:
+            emb_dim, hid_dim, n_layers = self._loaded_hparams
+            self._build_model(emb_dim, hid_dim, n_layers, batch_first=False)
+            if self.model is None:
+                return result
+            self.model.load_state_dict(self._loaded_state_dict)
+            self.model.eval()
+            alt_result, alt_unk_ratio = self._decode_greedy(sentence, max_len, batch_first=False)
+            if alt_result and alt_unk_ratio < unk_ratio:
+                result = alt_result
+                self._update_mode_status()
+            else:
+                emb_dim, hid_dim, n_layers = self._loaded_hparams
+                self._build_model(emb_dim, hid_dim, n_layers, batch_first=True)
+                if self.model is None:
+                    return result
+                self.model.load_state_dict(self._loaded_state_dict)
+                self.model.eval()
+                self._update_mode_status()
         
         # 应用纠错
         result = self.apply_corrections(result)
