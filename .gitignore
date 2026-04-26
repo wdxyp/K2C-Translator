@@ -156,6 +156,7 @@ cython_debug/
 # Project specific
 Translate\ Model\ Training/Training\ Data/
 Translate\ Model\ Training/Translate\ Model/
+.DS_Store
 *.pth
 *.pkl
 *.zip
