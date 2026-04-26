@@ -133,12 +133,14 @@ class Encoder(nn.Module):
     def __init__(self, input_dim, emb_dim, hid_dim, n_layers, dropout):
         super().__init__()
         self.embedding = nn.Embedding(input_dim, emb_dim)
-        self.rnn = nn.LSTM(emb_dim, hid_dim, n_layers, dropout=dropout)
+        self.rnn = nn.LSTM(emb_dim, hid_dim, n_layers, dropout=dropout, batch_first=True)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, src, src_lens):
+        # src: [batch_size, src_len]
         embedded = self.dropout(self.embedding(src))
-        packed = torch.nn.utils.rnn.pack_padded_sequence(embedded, src_lens, batch_first=False, enforce_sorted=False)
+        # src_lens 必须在 CPU 上用于 pack_padded_sequence
+        packed = torch.nn.utils.rnn.pack_padded_sequence(embedded, src_lens.to('cpu'), batch_first=True, enforce_sorted=False)
         outputs, (hidden, cell) = self.rnn(packed)
         return hidden, cell
 
@@ -147,15 +149,16 @@ class Decoder(nn.Module):
         super().__init__()
         self.output_dim = output_dim
         self.embedding = nn.Embedding(output_dim, emb_dim)
-        self.rnn = nn.LSTM(emb_dim, hid_dim, n_layers, dropout=dropout)
+        self.rnn = nn.LSTM(emb_dim, hid_dim, n_layers, dropout=dropout, batch_first=True)
         self.fc_out = nn.Linear(hid_dim, output_dim)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, input, hidden, cell):
-        input = input.unsqueeze(0)
+        # input: [batch_size]
+        input = input.unsqueeze(1) # [batch_size, 1]
         embedded = self.dropout(self.embedding(input))
         output, (hidden, cell) = self.rnn(embedded, (hidden, cell))
-        prediction = self.fc_out(output.squeeze(0))
+        prediction = self.fc_out(output.squeeze(1))
         return prediction, hidden, cell
 
 class Seq2Seq(nn.Module):
@@ -166,37 +169,34 @@ class Seq2Seq(nn.Module):
         self.device = device
 
     def forward(self, src, src_lens, trg, teacher_forcing_ratio=0.5):
-        # src: [src_len, batch_size]
-        # trg: [trg_len, batch_size]
+        # src: [batch_size, src_len]
+        # trg: [batch_size, trg_len]
         
-        # 在 DataParallel 模式下，batch_size 会被切分
-        batch_size = src.shape[1] 
-        trg_len = trg.shape[0]
+        batch_size = src.shape[0]
+        trg_len = trg.shape[1]
         trg_vocab_size = self.decoder.output_dim
         
-        # 确保 outputs 也在正确的设备上
-        outputs = torch.zeros(trg_len, batch_size, trg_vocab_size).to(src.device)
-        
-        # 编码器
+        outputs = torch.zeros(batch_size, trg_len, trg_vocab_size).to(src.device)
         hidden, cell = self.encoder(src, src_lens)
         
-        # 解码器第一个输入是 <sos>
-        input = trg[0, :]
+        # 第一个输入是 <sos>
+        input = trg[:, 0]
         
         for t in range(1, trg_len):
             output, hidden, cell = self.decoder(input, hidden, cell)
-            outputs[t] = output
+            outputs[:, t, :] = output
             teacher_force = np.random.random() < teacher_forcing_ratio
             top1 = output.argmax(1)
-            input = trg[t] if teacher_force else top1
+            input = trg[:, t] if teacher_force else top1
             
         return outputs
 
 def collate_fn(batch, pad_idx):
     ko_batch, zh_batch = zip(*batch)
-    ko_lens = [len(seq) for seq in ko_batch]
-    ko_padded = torch.nn.utils.rnn.pad_sequence(list(ko_batch), batch_first=False, padding_value=pad_idx)
-    zh_padded = torch.nn.utils.rnn.pad_sequence(list(zh_batch), batch_first=False, padding_value=pad_idx)
+    ko_lens = torch.LongTensor([len(seq) for seq in ko_batch])
+    # 全部改为 batch_first=True 以适配 DataParallel
+    ko_padded = torch.nn.utils.rnn.pad_sequence(list(ko_batch), batch_first=True, padding_value=pad_idx)
+    zh_padded = torch.nn.utils.rnn.pad_sequence(list(zh_batch), batch_first=True, padding_value=pad_idx)
     return ko_padded, ko_lens, zh_padded
 
 # ========== 4. 训练核心逻辑 ==========
@@ -283,9 +283,13 @@ def train_on_kaggle(corpus_path):
             src, trg = src.to(DEVICE), trg.to(DEVICE)
             optimizer.zero_grad()
             output = model(src, src_lens, trg)
+            
+            # output: [batch_size, trg_len, vocab_size]
+            # trg: [batch_size, trg_len]
             output_dim = output.shape[-1]
-            output = output[1:].view(-1, output_dim)
-            trg = trg[1:].view(-1)
+            output = output[:, 1:, :].reshape(-1, output_dim)
+            trg = trg[:, 1:].reshape(-1)
+            
             loss = criterion(output, trg)
             loss.backward()
             clip_grad_norm_(model.parameters(), 1.0)
@@ -307,8 +311,8 @@ def train_on_kaggle(corpus_path):
                 src, trg = src.to(DEVICE), trg.to(DEVICE)
                 output = model(src, src_lens, trg, 0)
                 output_dim = output.shape[-1]
-                output = output[1:].view(-1, output_dim)
-                trg = trg[1:].view(-1)
+                output = output[:, 1:, :].reshape(-1, output_dim)
+                trg = trg[:, 1:].reshape(-1)
                 loss = criterion(output, trg)
                 epoch_test_loss += loss.item()
         
