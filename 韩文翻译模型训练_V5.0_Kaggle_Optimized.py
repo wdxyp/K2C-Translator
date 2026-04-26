@@ -13,15 +13,17 @@ import openpyxl
 from konlpy.tag import Okt
 from datetime import datetime
 
-# ========== 1. 环境与设备配置 (Kaggle 优化版) ==========
+# ========== 1. 环境与设备配置 (Kaggle 多 GPU 优化版) ==========
 def get_device():
     if torch.cuda.is_available():
-        return torch.device('cuda')
+        device = torch.device('cuda')
+        gpu_count = torch.cuda.device_count()
+        print(f"✅ 检测到 {gpu_count} 个 NVIDIA GPU (T4)。")
+        return device, gpu_count
     else:
-        return torch.device('cpu')
+        return torch.device('cpu'), 0
 
-DEVICE = get_device()
-print(f"当前运行设备: {DEVICE}")
+DEVICE, GPU_COUNT = get_device()
 
 def find_data_file(filename):
     """在 Kaggle 输入目录中搜索数据文件"""
@@ -229,16 +231,23 @@ def train_on_kaggle(corpus_path):
     train_data = list(zip(text_to_tensor(ko_train, korean_vocab), text_to_tensor(zh_train, chinese_vocab)))
     test_data = list(zip(text_to_tensor(ko_test, korean_vocab), text_to_tensor(zh_test, chinese_vocab)))
 
-    # 参数配置 (Kaggle 默认提供强力 GPU)
+    # 参数配置 (Kaggle 2xT4 GPU 极大化优化)
+    # T4 有 16GB 显存，双卡共有 32GB。
+    # 增加 BATCH_SIZE 以充分利用双卡并行效率
     HID_DIM = 512
     EMB_DIM = 512
-    BATCH_SIZE = 128
+    BATCH_SIZE = 256 if GPU_COUNT > 1 else 128
     N_EPOCHS = 100
     
     # 初始化模型
     enc = Encoder(len(korean_vocab), EMB_DIM, HID_DIM, 2, 0.5)
     dec = Decoder(len(chinese_vocab), EMB_DIM, HID_DIM, 2, 0.5)
     model = Seq2Seq(enc, dec, DEVICE).to(DEVICE)
+    
+    # 如果有多个 GPU，使用 DataParallel 包装模型
+    if GPU_COUNT > 1:
+        print(f"🚀 正在开启多 GPU 并行训练模式 (DataParallel)...")
+        model = nn.DataParallel(model)
     
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     criterion = nn.CrossEntropyLoss(ignore_index=korean_vocab['<pad>'])
@@ -297,7 +306,9 @@ def train_on_kaggle(corpus_path):
         # 自动保存最优模型到 Kaggle 工作目录
         if avg_test_loss < best_test_loss:
             best_test_loss = avg_test_loss
-            torch.save(model.state_dict(), f'{save_dir}/best_model.pth')
+            # 如果是并行模型，保存时需要提取 .module
+            model_to_save = model.module if hasattr(model, 'module') else model
+            torch.save(model_to_save.state_dict(), f'{save_dir}/best_model.pth')
             with open(f'{save_dir}/vocabs.pkl', 'wb') as f:
                 pickle.dump({'ko': korean_vocab, 'zh': chinese_vocab}, f)
             print(f" ✨ 模型已保存至 {save_dir}/best_model.pth")
