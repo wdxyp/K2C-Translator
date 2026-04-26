@@ -11,7 +11,6 @@ import pickle
 import jieba
 import openpyxl
 from konlpy.tag import Okt
-from datetime import datetime
 
 # ========== 1. 环境与设备配置 (V5.3 终极稳定版) ==========
 def get_device():
@@ -30,7 +29,7 @@ def find_data_file(filename):
     kaggle_input_base = "/kaggle/input"
     if os.path.exists(kaggle_input_base):
         print(f"🔍 正在 Kaggle Input 中搜索: {filename} ...")
-        for root, dirs, files in os.walk(kaggle_input_base):
+        for root, _, files in os.walk(kaggle_input_base):
             for f in files:
                 if filename.lower() in f.lower() and any(f.endswith(ext) for ext in ['.xlsx', '.xls', '.csv']):
                     full_path = os.path.join(root, f)
@@ -146,8 +145,8 @@ class Seq2Seq(nn.Module):
 def collate_fn(batch, pad_idx):
     ko, zh = zip(*batch)
     ko_lens = torch.LongTensor([len(x) for x in ko])
-    ko_padded = torch.nn.utils.rnn.pad_sequence(ko, batch_first=True, padding_value=pad_idx)
-    zh_padded = torch.nn.utils.rnn.pad_sequence(zh, batch_first=True, padding_value=pad_idx)
+    ko_padded = torch.nn.utils.rnn.pad_sequence(list(ko), batch_first=True, padding_value=pad_idx)
+    zh_padded = torch.nn.utils.rnn.pad_sequence(list(zh), batch_first=True, padding_value=pad_idx)
     return ko_padded, ko_lens, zh_padded
 
 # ========== 4. 训练核心逻辑 ==========
@@ -156,7 +155,12 @@ def train_on_kaggle(corpus_path):
     
     # 读取数据
     all_ko, all_zh = [], []
-    ws = openpyxl.load_workbook(corpus_path, data_only=True).active
+    wb = openpyxl.load_workbook(corpus_path, data_only=True)
+    ws = wb.active
+    if ws is None:
+        print("❌ 错误: Excel 表格中没有活动工作表。")
+        return
+
     for row in ws.iter_rows(min_row=2, values_only=True):
         if len(row) >= 4 and row[1] and row[3]:
             all_ko.append(clean_text(row[1])); all_zh.append(clean_text(row[3]))
