@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.nn.utils.clip_grad import clip_grad_norm_
 from torch.cuda.amp import autocast, GradScaler
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, Dataset
 from collections import Counter
 import os
@@ -100,7 +101,8 @@ def build_vocab(sentences, max_size=30000):
         for w in s:
             if isinstance(w, str) and w.strip(): counter[w] += 1
     vocab = {'<pad>': 0, '<sos>': 1, '<eos>': 2, '<unk>': 3}
-    for w, _ in counter.most_common(max_size):
+    most_common = counter.most_common() if max_size is None else counter.most_common(max_size)
+    for w, _ in most_common:
         if w not in vocab: vocab[w] = len(vocab)
     return vocab
 
@@ -206,25 +208,34 @@ def train_on_kaggle(corpus_path):
     BATCH_SIZE = 64 if GPU_COUNT > 1 else 32  # 从 128 降至 64
     N_EPOCHS = 100
     MAX_LEN = 100  # 限制最大长度，防止异常长句子撑爆显存
+    LR = 0.001
+    WEIGHT_DECAY = 0.0
+    EARLY_STOP_PATIENCE = 8
+    EARLY_STOP_MIN_DELTA = 0.001
+    KO_VOCAB_MAX_SIZE = 50000
+    ZH_VOCAB_MAX_SIZE = 50000
     
     # 清理显存碎片
     torch.cuda.empty_cache()
-    
-    # 过滤超长句子
-    filtered_ko, filtered_zh = [], []
-    for k, z in zip(all_ko, all_zh):
-        if len(k) <= MAX_LEN and len(z) <= MAX_LEN:
-            filtered_ko.append(k); filtered_zh.append(z)
-    all_ko, all_zh = filtered_ko, filtered_zh
     
     # 分词
     cache_dir = "/kaggle/working/token_cache"
     ko_tokens = tokenize(all_ko, 'ko', f"{cache_dir}/ko.pkl")
     zh_tokens = tokenize(all_zh, 'zh', f"{cache_dir}/zh.pkl")
+
+    filtered_pairs = [(k, z) for k, z in zip(ko_tokens, zh_tokens) if len(k) <= MAX_LEN and len(z) <= MAX_LEN]
+    if not filtered_pairs:
+        print("❌ 错误: 过滤后数据为空，请检查 MAX_LEN 或语料内容。")
+        return
+    ko_tokens, zh_tokens = zip(*filtered_pairs)
+    ko_tokens, zh_tokens = list(ko_tokens), list(zh_tokens)
+    if len(ko_tokens) < 110000:
+        print(f"⚠️ 提示: 过滤后样本数={len(ko_tokens)}，小于 110000。可考虑增大 MAX_LEN 或检查语料筛选条件。")
     
     # 划分数据集
     ko_train, ko_test, zh_train, zh_test = train_test_split(ko_tokens, zh_tokens, test_size=0.1, random_state=42)
-    k_vocab = build_vocab(ko_train); c_vocab = build_vocab(zh_train)
+    k_vocab = build_vocab(ko_train, max_size=KO_VOCAB_MAX_SIZE)
+    c_vocab = build_vocab(zh_train, max_size=ZH_VOCAB_MAX_SIZE)
     
     print(f"📊 统计: 训练集={len(ko_train)}, 韩语词={len(k_vocab)}, 中文词={len(c_vocab)}")
     
@@ -235,8 +246,9 @@ def train_on_kaggle(corpus_path):
         print("🚀 开启 DataParallel (双 T4)...")
         model = nn.DataParallel(model)
     
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    optimizer = optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     criterion = nn.CrossEntropyLoss(ignore_index=c_vocab['<pad>'])
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, min_lr=1e-5)
     
     # 开启混合精度训练 (AMP) - 使用最新 torch.amp 接口
     scaler = GradScaler(enabled=torch.cuda.is_available())
@@ -252,18 +264,20 @@ def train_on_kaggle(corpus_path):
         collate_fn=lambda b: collate_fn(b, k_vocab['<pad>']))
     
     best_loss = float('inf')
+    no_improve_epochs = 0
     save_dir = '/kaggle/working/Translate_Model_Kaggle'
     os.makedirs(save_dir, exist_ok=True)
 
     for epoch in range(N_EPOCHS):
         model.train(); epoch_loss = 0
+        teacher_forcing_ratio = max(0.0, 0.5 * (1.0 - (epoch / max(1, N_EPOCHS - 1))))
         for i, (src, src_lens, trg) in enumerate(train_loader):
             src, trg = src.to(DEVICE), trg.to(DEVICE)
             optimizer.zero_grad()
             
             # 使用混合精度进行前向传播
             with autocast(enabled=torch.cuda.is_available()):
-                output = model(src, src_lens, trg)
+                output = model(src, src_lens, trg, teacher_forcing_ratio=teacher_forcing_ratio)
                 output_dim = output.shape[-1]
                 loss = criterion(output[:, 1:, :].reshape(-1, output_dim), trg[:, 1:].reshape(-1))
             
@@ -289,10 +303,14 @@ def train_on_kaggle(corpus_path):
         
         avg_train = epoch_loss / len(train_loader)
         avg_test = test_loss / len(test_loader)
-        print(f"\n[Summary] Epoch:{epoch+1:02d} | Train Loss:{avg_train:.3f} | Test Loss:{avg_test:.3f}")
+        current_lr = float(optimizer.param_groups[0].get('lr', LR))
+        print(f"\n[Summary] Epoch:{epoch+1:02d} | Train Loss:{avg_train:.3f} | Test Loss:{avg_test:.3f} | LR:{current_lr:.6f} | TF:{teacher_forcing_ratio:.2f}")
+
+        scheduler.step(avg_test)
         
-        if avg_test < best_loss:
+        if avg_test < best_loss - EARLY_STOP_MIN_DELTA:
             best_loss = avg_test
+            no_improve_epochs = 0
             model_to_save = model.module if hasattr(model, 'module') else model
             torch.save(model_to_save.state_dict(), f'{save_dir}/best_model.pth')
             
@@ -303,6 +321,11 @@ def train_on_kaggle(corpus_path):
                 pickle.dump(c_vocab, f)
                 
             print(f" ✨ 模型与词汇表已保存至 {save_dir}")
+        else:
+            no_improve_epochs += 1
+            if no_improve_epochs >= EARLY_STOP_PATIENCE:
+                print(f" 🛑 早停触发: Test Loss 已连续 {no_improve_epochs} 轮无显著改善，最佳为 {best_loss:.3f}")
+                break
 
 if __name__ == "__main__":
     path = find_data_file("Corpus(K2C)-2")
