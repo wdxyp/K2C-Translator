@@ -19,7 +19,9 @@ import jieba
 import openpyxl
 from konlpy.tag import Okt
 
-# ========== 1. 环境与设备配置 (V5.3 终极稳定版) ==========
+# ========== 1. 环境与设备配置 (V5.5 深度内存优化版) ==========
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+
 def get_device():
     if torch.cuda.is_available():
         device = torch.device('cuda')
@@ -172,6 +174,23 @@ def train_on_kaggle(corpus_path):
         if len(row) >= 4 and row[1] and row[3]:
             all_ko.append(clean_text(row[1])); all_zh.append(clean_text(row[3]))
     
+    # 参数配置 (V5.5 极致显存压缩)
+    HID_DIM = 256  # 从 512 降至 256
+    EMB_DIM = 256  # 从 512 降至 256
+    BATCH_SIZE = 64 if GPU_COUNT > 1 else 32  # 从 128 降至 64
+    N_EPOCHS = 100
+    MAX_LEN = 100  # 限制最大长度，防止异常长句子撑爆显存
+    
+    # 清理显存碎片
+    torch.cuda.empty_cache()
+    
+    # 过滤超长句子
+    filtered_ko, filtered_zh = [], []
+    for k, z in zip(all_ko, all_zh):
+        if len(k) <= MAX_LEN and len(z) <= MAX_LEN:
+            filtered_ko.append(k); filtered_zh.append(z)
+    all_ko, all_zh = filtered_ko, filtered_zh
+    
     # 分词
     cache_dir = "/kaggle/working/token_cache"
     ko_tokens = tokenize(all_ko, 'ko', f"{cache_dir}/ko.pkl")
@@ -182,15 +201,6 @@ def train_on_kaggle(corpus_path):
     k_vocab = build_vocab(ko_train); c_vocab = build_vocab(zh_train)
     
     print(f"📊 统计: 训练集={len(ko_train)}, 韩语词={len(k_vocab)}, 中文词={len(c_vocab)}")
-    
-    # 参数配置 (Kaggle 2xT4 GPU 显存优化)
-    HID_DIM = 512
-    EMB_DIM = 512
-    BATCH_SIZE = 128 if GPU_COUNT > 1 else 64  # 降低 BATCH_SIZE 防止 GPU 0 溢出
-    N_EPOCHS = 100
-    
-    # 清理显存碎片
-    torch.cuda.empty_cache()
     
     # 初始化模型与多 GPU
     model = Seq2Seq(Encoder(len(k_vocab), EMB_DIM, HID_DIM, 2, 0.5), 
