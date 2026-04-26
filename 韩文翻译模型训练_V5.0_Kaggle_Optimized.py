@@ -176,26 +176,37 @@ def train_on_kaggle(corpus_path):
     
     print(f"📊 统计: 训练集={len(ko_train)}, 韩语词={len(k_vocab)}, 中文词={len(c_vocab)}")
     
-    # 转张量与加载器
-    train_loader = torch.utils.data.DataLoader(
-        list(zip(text_to_tensor(ko_train, k_vocab), text_to_tensor(zh_train, c_vocab))),
-        batch_size=256 if GPU_COUNT > 1 else 128, shuffle=True, 
-        collate_fn=lambda b: collate_fn(b, k_vocab['<pad>']))
+    # 参数配置 (Kaggle 2xT4 GPU 显存优化)
+    HID_DIM = 512
+    EMB_DIM = 512
+    BATCH_SIZE = 128 if GPU_COUNT > 1 else 64  # 降低 BATCH_SIZE 防止 GPU 0 溢出
+    N_EPOCHS = 100
     
-    test_loader = torch.utils.data.DataLoader(
-        list(zip(text_to_tensor(ko_test, k_vocab), text_to_tensor(zh_test, c_vocab))),
-        batch_size=256 if GPU_COUNT > 1 else 128, shuffle=False,
-        collate_fn=lambda b: collate_fn(b, k_vocab['<pad>']))
+    # 清理显存碎片
+    torch.cuda.empty_cache()
     
     # 初始化模型与多 GPU
-    model = Seq2Seq(Encoder(len(k_vocab), 512, 512, 2, 0.5), 
-                    Decoder(len(c_vocab), 512, 512, 2, 0.5), DEVICE).to(DEVICE)
+    model = Seq2Seq(Encoder(len(k_vocab), EMB_DIM, HID_DIM, 2, 0.5), 
+                    Decoder(len(c_vocab), EMB_DIM, HID_DIM, 2, 0.5), DEVICE).to(DEVICE)
     if GPU_COUNT > 1:
         print("🚀 开启 DataParallel (双 T4)...")
         model = nn.DataParallel(model)
     
     optimizer = optim.Adam(model.parameters(), lr=0.001)
-    criterion = nn.CrossEntropyLoss(ignore_index=c_vocab['<pad>']) # 核心修复：使用目标语言 pad
+    criterion = nn.CrossEntropyLoss(ignore_index=c_vocab['<pad>'])
+    
+    # 开启混合精度训练 (AMP)
+    scaler = torch.cuda.amp.GradScaler()
+    
+    train_loader = torch.utils.data.DataLoader(
+        list(zip(text_to_tensor(ko_train, k_vocab), text_to_tensor(zh_train, c_vocab))),
+        batch_size=BATCH_SIZE, shuffle=True, 
+        collate_fn=lambda b: collate_fn(b, k_vocab['<pad>']))
+    
+    test_loader = torch.utils.data.DataLoader(
+        list(zip(text_to_tensor(ko_test, k_vocab), text_to_tensor(zh_test, c_vocab))),
+        batch_size=BATCH_SIZE, shuffle=False,
+        collate_fn=lambda b: collate_fn(b, k_vocab['<pad>']))
     
     best_loss = float('inf')
     save_dir = '/kaggle/working/Translate_Model_Kaggle'
@@ -206,13 +217,20 @@ def train_on_kaggle(corpus_path):
         for i, (src, src_lens, trg) in enumerate(train_loader):
             src, trg = src.to(DEVICE), trg.to(DEVICE)
             optimizer.zero_grad()
-            output = model(src, src_lens, trg)
             
-            # Loss 计算对齐
-            output_dim = output.shape[-1]
-            loss = criterion(output[:, 1:, :].reshape(-1, output_dim), trg[:, 1:].reshape(-1))
+            # 使用混合精度进行前向传播
+            with torch.cuda.amp.autocast():
+                output = model(src, src_lens, trg)
+                output_dim = output.shape[-1]
+                loss = criterion(output[:, 1:, :].reshape(-1, output_dim), trg[:, 1:].reshape(-1))
             
-            loss.backward(); clip_grad_norm_(model.parameters(), 1.0); optimizer.step()
+            # 缩放损失并进行反向传播
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            
             epoch_loss += loss.item()
             if (i+1)%20==0: print(f" Epoch:{epoch+1:02d} B:{i+1}/{len(train_loader)} Loss:{loss.item():.3f}", end='\r')
         
