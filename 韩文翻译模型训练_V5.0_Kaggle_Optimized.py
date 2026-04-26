@@ -10,8 +10,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.nn.utils.clip_grad import clip_grad_norm_
-from torch.cuda.amp.autocast_mode import autocast
-from torch.cuda.amp.grad_scaler import GradScaler
 from collections import Counter
 import os
 import pickle
@@ -212,8 +210,8 @@ def train_on_kaggle(corpus_path):
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     criterion = nn.CrossEntropyLoss(ignore_index=c_vocab['<pad>'])
     
-    # 开启混合精度训练 (AMP)
-    scaler = GradScaler()
+    # 开启混合精度训练 (AMP) - 使用最新 torch.amp 接口
+    scaler = torch.amp.GradScaler('cuda')
     
     train_loader = torch.utils.data.DataLoader(
         list(zip(text_to_tensor(ko_train, k_vocab), text_to_tensor(zh_train, c_vocab))),
@@ -236,7 +234,7 @@ def train_on_kaggle(corpus_path):
             optimizer.zero_grad()
             
             # 使用混合精度进行前向传播
-            with autocast():
+            with torch.amp.autocast('cuda'):
                 output = model(src, src_lens, trg)
                 output_dim = output.shape[-1]
                 loss = criterion(output[:, 1:, :].reshape(-1, output_dim), trg[:, 1:].reshape(-1))
@@ -259,7 +257,7 @@ def train_on_kaggle(corpus_path):
         with torch.no_grad():
             for src, src_lens, trg in test_loader:
                 src, trg = src.to(DEVICE), trg.to(DEVICE)
-                with autocast():
+                with torch.amp.autocast('cuda'):
                     output = model(src, src_lens, trg, 0)
                     test_loss += criterion(output[:, 1:, :].reshape(-1, output.shape[-1]), trg[:, 1:].reshape(-1)).item()
         
