@@ -5,11 +5,13 @@ import warnings
 # 屏蔽来自第三方库（如 jieba）的 Python 3.12 语法警告
 warnings.filterwarnings("ignore", category=SyntaxWarning)
 
-from sklearn.model_selection import train_test_split
+import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.nn.utils.clip_grad import clip_grad_norm_
+from torch.cuda.amp import autocast, GradScaler
+from torch.utils.data import DataLoader, Dataset
 from collections import Counter
 import os
 import pickle
@@ -30,6 +32,22 @@ def get_device():
         return torch.device('cpu'), 0
 
 DEVICE, GPU_COUNT = get_device()
+
+def train_test_split(x, y, test_size=0.1, random_state=42):
+    if len(x) != len(y):
+        raise ValueError("x 与 y 长度不一致")
+    n = len(x)
+    indices = list(range(n))
+    rng = random.Random(random_state)
+    rng.shuffle(indices)
+    split = int(n * (1 - test_size))
+    train_idx = indices[:split]
+    test_idx = indices[split:]
+    x_train = [x[i] for i in train_idx]
+    x_test = [x[i] for i in test_idx]
+    y_train = [y[i] for i in train_idx]
+    y_test = [y[i] for i in test_idx]
+    return x_train, x_test, y_train, y_test
 
 def find_data_file(filename):
     """在 Kaggle 输入目录中搜索数据文件"""
@@ -156,6 +174,16 @@ def collate_fn(batch, pad_idx):
     zh_padded = torch.nn.utils.rnn.pad_sequence(list(zh), batch_first=True, padding_value=pad_idx)
     return ko_padded, ko_lens, zh_padded
 
+class PairDataset(Dataset):
+    def __init__(self, pairs):
+        self.pairs = pairs
+
+    def __len__(self):
+        return len(self.pairs)
+
+    def __getitem__(self, idx):
+        return self.pairs[idx]
+
 # ========== 4. 训练核心逻辑 ==========
 def train_on_kaggle(corpus_path):
     print(f"🚀 启动 Kaggle 训练 (V5.3 终极版)...")
@@ -211,15 +239,15 @@ def train_on_kaggle(corpus_path):
     criterion = nn.CrossEntropyLoss(ignore_index=c_vocab['<pad>'])
     
     # 开启混合精度训练 (AMP) - 使用最新 torch.amp 接口
-    scaler = torch.amp.GradScaler('cuda')
+    scaler = GradScaler(enabled=torch.cuda.is_available())
     
-    train_loader = torch.utils.data.DataLoader(
-        list(zip(text_to_tensor(ko_train, k_vocab), text_to_tensor(zh_train, c_vocab))),
+    train_loader = DataLoader(
+        PairDataset(list(zip(text_to_tensor(ko_train, k_vocab), text_to_tensor(zh_train, c_vocab)))),
         batch_size=BATCH_SIZE, shuffle=True, 
         collate_fn=lambda b: collate_fn(b, k_vocab['<pad>']))
     
-    test_loader = torch.utils.data.DataLoader(
-        list(zip(text_to_tensor(ko_test, k_vocab), text_to_tensor(zh_test, c_vocab))),
+    test_loader = DataLoader(
+        PairDataset(list(zip(text_to_tensor(ko_test, k_vocab), text_to_tensor(zh_test, c_vocab)))),
         batch_size=BATCH_SIZE, shuffle=False,
         collate_fn=lambda b: collate_fn(b, k_vocab['<pad>']))
     
@@ -234,15 +262,13 @@ def train_on_kaggle(corpus_path):
             optimizer.zero_grad()
             
             # 使用混合精度进行前向传播
-            with torch.amp.autocast('cuda'):
+            with autocast(enabled=torch.cuda.is_available()):
                 output = model(src, src_lens, trg)
                 output_dim = output.shape[-1]
                 loss = criterion(output[:, 1:, :].reshape(-1, output_dim), trg[:, 1:].reshape(-1))
             
             # 缩放损失并进行反向传播
-            scaled_loss = scaler.scale(loss)
-            if isinstance(scaled_loss, torch.Tensor):
-                scaled_loss.backward()
+            scaler.scale(loss).backward()
             
             scaler.unscale_(optimizer)
             clip_grad_norm_(model.parameters(), 1.0)
@@ -257,7 +283,7 @@ def train_on_kaggle(corpus_path):
         with torch.no_grad():
             for src, src_lens, trg in test_loader:
                 src, trg = src.to(DEVICE), trg.to(DEVICE)
-                with torch.amp.autocast('cuda'):
+                with autocast(enabled=torch.cuda.is_available()):
                     output = model(src, src_lens, trg, 0)
                     test_loss += criterion(output[:, 1:, :].reshape(-1, output.shape[-1]), trg[:, 1:].reshape(-1)).item()
         
