@@ -1,5 +1,10 @@
 import re
 import numpy as np
+import warnings
+
+# 屏蔽来自第三方库（如 jieba）的 Python 3.12 语法警告
+warnings.filterwarnings("ignore", category=SyntaxWarning)
+
 from sklearn.model_selection import train_test_split
 import torch
 import torch.nn as nn
