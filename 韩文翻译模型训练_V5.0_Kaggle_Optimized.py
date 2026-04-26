@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.nn.utils.clip_grad import clip_grad_norm_
+from torch.cuda.amp.autocast_mode import autocast
+from torch.cuda.amp.grad_scaler import GradScaler
 from collections import Counter
 import os
 import pickle
@@ -75,7 +77,7 @@ def build_vocab(sentences, max_size=30000):
         for w in s:
             if isinstance(w, str) and w.strip(): counter[w] += 1
     vocab = {'<pad>': 0, '<sos>': 1, '<eos>': 2, '<unk>': 3}
-    for w, f in counter.most_common(max_size):
+    for w, _ in counter.most_common(max_size):
         if w not in vocab: vocab[w] = len(vocab)
     return vocab
 
@@ -196,7 +198,7 @@ def train_on_kaggle(corpus_path):
     criterion = nn.CrossEntropyLoss(ignore_index=c_vocab['<pad>'])
     
     # 开启混合精度训练 (AMP)
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = GradScaler()
     
     train_loader = torch.utils.data.DataLoader(
         list(zip(text_to_tensor(ko_train, k_vocab), text_to_tensor(zh_train, c_vocab))),
@@ -212,20 +214,23 @@ def train_on_kaggle(corpus_path):
     save_dir = '/kaggle/working/Translate_Model_Kaggle'
     os.makedirs(save_dir, exist_ok=True)
 
-    for epoch in range(100):
+    for epoch in range(N_EPOCHS):
         model.train(); epoch_loss = 0
         for i, (src, src_lens, trg) in enumerate(train_loader):
             src, trg = src.to(DEVICE), trg.to(DEVICE)
             optimizer.zero_grad()
             
             # 使用混合精度进行前向传播
-            with torch.cuda.amp.autocast():
+            with autocast():
                 output = model(src, src_lens, trg)
                 output_dim = output.shape[-1]
                 loss = criterion(output[:, 1:, :].reshape(-1, output_dim), trg[:, 1:].reshape(-1))
             
             # 缩放损失并进行反向传播
-            scaler.scale(loss).backward()
+            scaled_loss = scaler.scale(loss)
+            if isinstance(scaled_loss, torch.Tensor):
+                scaled_loss.backward()
+            
             scaler.unscale_(optimizer)
             clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(optimizer)
@@ -239,8 +244,9 @@ def train_on_kaggle(corpus_path):
         with torch.no_grad():
             for src, src_lens, trg in test_loader:
                 src, trg = src.to(DEVICE), trg.to(DEVICE)
-                output = model(src, src_lens, trg, 0)
-                test_loss += criterion(output[:, 1:, :].reshape(-1, output.shape[-1]), trg[:, 1:].reshape(-1)).item()
+                with autocast():
+                    output = model(src, src_lens, trg, 0)
+                    test_loss += criterion(output[:, 1:, :].reshape(-1, output.shape[-1]), trg[:, 1:].reshape(-1)).item()
         
         avg_train = epoch_loss / len(train_loader)
         avg_test = test_loss / len(test_loader)
