@@ -166,18 +166,30 @@ class Seq2Seq(nn.Module):
         self.device = device
 
     def forward(self, src, src_lens, trg, teacher_forcing_ratio=0.5):
-        batch_size = trg.shape[1]
+        # src: [src_len, batch_size]
+        # trg: [trg_len, batch_size]
+        
+        # 在 DataParallel 模式下，batch_size 会被切分
+        batch_size = src.shape[1] 
         trg_len = trg.shape[0]
         trg_vocab_size = self.decoder.output_dim
-        outputs = torch.zeros(trg_len, batch_size, trg_vocab_size).to(self.device)
+        
+        # 确保 outputs 也在正确的设备上
+        outputs = torch.zeros(trg_len, batch_size, trg_vocab_size).to(src.device)
+        
+        # 编码器
         hidden, cell = self.encoder(src, src_lens)
+        
+        # 解码器第一个输入是 <sos>
         input = trg[0, :]
+        
         for t in range(1, trg_len):
             output, hidden, cell = self.decoder(input, hidden, cell)
             outputs[t] = output
             teacher_force = np.random.random() < teacher_forcing_ratio
             top1 = output.argmax(1)
             input = trg[t] if teacher_force else top1
+            
         return outputs
 
 def collate_fn(batch, pad_idx):
