@@ -232,7 +232,14 @@ def train_on_kaggle(corpus_path):
             best_loss = avg_test
             model_to_save = model.module if hasattr(model, 'module') else model
             torch.save(model_to_save.state_dict(), f'{save_dir}/best_model.pth')
-            print(f" ✨ 模型已保存至 {save_dir}")
+            
+            # 分别保存韩语和中文词汇表
+            with open(f'{save_dir}/kr_vocab.pkl', 'wb') as f:
+                pickle.dump(k_vocab, f)
+            with open(f'{save_dir}/zh_vocab.pkl', 'wb') as f:
+                pickle.dump(c_vocab, f)
+                
+            print(f" ✨ 模型与词汇表已保存至 {save_dir}")
 
 if __name__ == "__main__":
     path = find_data_file("Corpus(K2C)-2")
