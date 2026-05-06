@@ -156,6 +156,7 @@ cython_debug/
 # Project specific
 Translate\ Model\ Training/Training\ Data/
 Translate\ Model\ Training/Translate\ Model/
+memo_output*/
 .DS_Store
 *.pth
 *.pkl
@@ -164,5 +165,6 @@ Translate\ Model\ Training/Translate\ Model/
 *.xlsx
 *.png
 *.txt
+!examples/sample_memo.txt
 !requirements.txt
 .*sunloginclient*
