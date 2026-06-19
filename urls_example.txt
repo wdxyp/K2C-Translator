@@ -1,0 +1,69 @@
+# 韩国产业 / 自动化 / 半导体设备 / 机器人 新闻列表页
+# 用法: python build_trusted_corpus.py collect --urls corpus_sources/urls_example.txt --max-sentences 10000
+# 输出默认: corpus_trusted/ko_corpus_10000_YYYYMMDD_HHMMSS.xlsx（自动加时间戳）
+# 爬取历史: corpus_trusted/crawl_history.json（已爬文章/已收集句子，下次自动跳过）
+# 脚本会从各列表页自动发现文章并提取韩文句（以句号分句）
+
+# --- 电子·产业综合 ---
+https://www.epnc.co.kr/news/articleList.html?view_type=sm
+https://www.digitaltoday.co.kr/news/articleList.html?view_type=sm
+https://www.itbiznews.com/news/articleList.html?view_type=sm
+https://www.ebn.co.kr/news/articleList.html?view_type=sm
+https://www.kmecnews.co.kr/news/articleList.html?view_type=sm
+https://www.press9.kr/news/articleList.html?view_type=sm
+https://www.widedaily.com/news/articleList.html?view_type=sm
+https://www.newstof.com/news/articleList.html?view_type=sm
+https://www.etnews.com/news/articleList.html
+https://news.mt.co.kr/list.html?code=0100
+https://www.joongang.co.kr/economy
+https://www.hankyung.com/economy
+https://www.mk.co.kr/news/economy
+https://www.hani.co.kr/arti/economy/index.html
+
+# --- 工业自动化 / FA / 机器人 ---
+https://www.industrynews.co.kr/news/articleList.html?view_type=sm
+https://www.fajournal.com/news/articleList.html?view_type=sm
+https://www.irobotnews.com/news/articleList.html?view_type=sm
+https://www.hellot.net/news/articleList.html?view_type=sm
+https://www.automationworld.co.kr/news/articleList.html?view_type=sm
+
+# --- 半导体·显示（制造装备相关） ---
+https://www.thelec.kr/news/articleList.html?view_type=sm
+https://www.thelec.net/news/articleList.html?view_type=sm
+https://www.etnews.com/news/semiconductor
+https://news.naver.com/main/list.naver?mode=LS2D&mid=shm&sid1=105&sid2=230
+
+# --- IT/科技新闻 ---
+https://www.chosun.com/economy/tech_it/
+http://www.news24korea.com/?r=s135053&c=19
+https://news.naver.com/main/list.naver?mode=LS2D&mid=shm&sid1=105&sid2=227
+https://www.zdnet.co.kr/news/newslist.html
+https://www.ddaily.co.kr/news/articleList.html?view_type=sm
+https://www.slashgear.co.kr/news/articleList.html?view_type=sm
+https://www.bloter.net/news/articleList.html?view_type=sm
+https://www.techm.kr/news/articleList.html?view_type=sm
+https://www.techholic.co.kr/news/articleList.html?view_type=sm
+
+# --- 经济/商业新闻 ---
+https://news.naver.com/main/list.naver?mode=LS2D&mid=shm&sid1=101&sid2=259
+https://www.chosun.com/economy/
+https://www.khan.co.kr/economy.html
+https://www.segye.com/newsList.html?code=010000
+https://www.yonhapnews.co.kr/economy.html
+
+# --- 补充来源（用于扩充语料量） ---
+https://www.enetnews.co.kr/news/articleList.html?view_type=sm
+https://www.smartfn.co.kr/news/articleList.html?view_type=sm
+https://www.aitimes.kr/news/articleList.html?view_type=sm
+https://www.donga.com/news/Economy
+https://www.mbn.co.kr/news/economy
+
+# --- 综合新闻门户 ---
+https://news.naver.com/main/main.naver?mode=LSD&mid=shm&sid1=101
+https://news.naver.com/main/main.naver?mode=LSD&mid=shm&sid1=105
+https://news.daum.net/economic
+https://news.daum.net/digital
+
+# --- 产业、文化 ---
+https://biz.chosun.com/industry/
+https://biz.chosun.com/culture/
